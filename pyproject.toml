@@ -1,0 +1,18 @@
+[project]
+name = "autossh"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = "==3.13.*"
+dependencies = [
+    "pyinstaller==6.20.*",
+    "pyqt5==5.15.*",
+]
+
+[[tool.uv.index]]
+#name = "runflare"  # parspack - liara
+name = "parspack" #- liara
+#url = "https://mirror.abrha.net/repository/pypi/simple"
+url = "https://mirror-pypi.runflare.com/simple"
+#url = "https://package-mirror.liara.ir/repository/pypi/simple"
+default = true
