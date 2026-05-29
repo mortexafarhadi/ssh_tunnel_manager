@@ -1,9 +1,3 @@
-design ui with pyqt
-
-convert .ui file to py file with this code
-
-	pyuic5 -x file_name.ui -o file_name.py
-	
 create executable file from py file
 
-	pyinstaller --onefile file_name.py
+	pyinstaller --onefile --icon=logo.ico --name="ssh_tunnel_manager" main.py

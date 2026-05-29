@@ -510,6 +510,30 @@ def _win_set_proxy(enable, server=""):
         pass
 
 
+def _gsettings_set(schema, key, value):
+    """تنظیم یک کلید gsettings و تأیید واقعی اعمال آن.
+
+    نکته: gsettings حتی وقتی commit به dconf شکست می‌خورد (مثلاً نبودِ
+    باس D-Bus) با کد خروجی صفر بازمی‌گردد. به همین خاطر بعد از set،
+    مقدار را دوباره می‌خوانیم و با مقدار موردانتظار مقایسه می‌کنیم.
+    """
+    res = subprocess.run(["gsettings", "set", schema, key, value],
+                         capture_output=True, text=True)
+    if res.returncode != 0:
+        raise RuntimeError(
+            (res.stderr or res.stdout or "gsettings set failed").strip())
+    # اگر در stderr هشدار شکست commit بود، یعنی واقعاً اعمال نشده
+    if "failed to commit" in (res.stderr or "").lower():
+        raise RuntimeError((res.stderr or "").strip())
+    return res
+
+
+def _gsettings_get(schema, key):
+    res = subprocess.run(["gsettings", "get", schema, key],
+                         capture_output=True, text=True)
+    return res.stdout.strip().strip("'") if res.returncode == 0 else None
+
+
 def set_system_socks(port):
     """تنظیم SOCKS سیستم روی 127.0.0.1:port."""
     if OS == "windows":
@@ -520,9 +544,13 @@ def set_system_socks(port):
             return False, str(e)
     if gsettings_available():
         try:
-            subprocess.run(["gsettings", "set", "org.gnome.system.proxy", "mode", "manual"], check=True)
-            subprocess.run(["gsettings", "set", "org.gnome.system.proxy.socks", "host", "127.0.0.1"], check=True)
-            subprocess.run(["gsettings", "set", "org.gnome.system.proxy.socks", "port", str(port)], check=True)
+            # ابتدا مقادیر socks، سپس فعال‌سازی حالت manual
+            _gsettings_set("org.gnome.system.proxy.socks", "host", "127.0.0.1")
+            _gsettings_set("org.gnome.system.proxy.socks", "port", str(int(port)))
+            _gsettings_set("org.gnome.system.proxy", "mode", "manual")
+            # تأیید: mode باید manual شده باشد
+            if _gsettings_get("org.gnome.system.proxy", "mode") != "manual":
+                return False, "Could not apply manual proxy mode (gsettings not committed)."
             return True, f"System SOCKS set to 127.0.0.1:{port}."
         except Exception as e:
             return False, str(e)
@@ -530,7 +558,14 @@ def set_system_socks(port):
 
 
 def set_system_proxy_auto():
-    """هنگام قطع: روی لینوکس → Automatic؛ روی ویندوز → غیرفعال (مستقیم)."""
+    """هنگام قطع: روی لینوکس → حالت Automatic (فعال)؛ روی ویندوز → غیرفعال (مستقیم).
+
+    در GNOME سه حالت داریم: none / manual / auto. کاربر «حالت اتوماتیک
+    فعال» را می‌خواهد، یعنی mode = 'auto'. مهم‌ترین گام تغییرِ خودِ mode
+    است؛ پاک‌کردن host/port فقط برای تمیزماندن تنظیمات manual است و نباید
+    مانع از تغییر mode شود. پس ابتدا mode را عوض می‌کنیم و آن را تأیید
+    می‌کنیم، سپس مقادیر manual را پاک می‌کنیم.
+    """
     if OS == "windows":
         try:
             _win_set_proxy(False)
@@ -539,9 +574,20 @@ def set_system_proxy_auto():
             return False, str(e)
     if gsettings_available():
         try:
-            subprocess.run(["gsettings", "set", "org.gnome.system.proxy.socks", "host", ""], check=True)
-            subprocess.run(["gsettings", "set", "org.gnome.system.proxy.socks", "port", "0"], check=True)
-            subprocess.run(["gsettings", "set", "org.gnome.system.proxy", "mode", "auto"], check=True)
+            # گام کلیدی: حالت را روی auto بگذار و تأیید کن
+            _gsettings_set("org.gnome.system.proxy", "mode", "auto")
+            mode_now = _gsettings_get("org.gnome.system.proxy", "mode")
+            if mode_now != "auto":
+                return False, (
+                    "Could not switch proxy to Automatic mode "
+                    f"(mode is still '{mode_now}'). gsettings may have failed "
+                    "to commit changes to dconf.")
+            # حالا تنظیمات manual را پاک کن (شکستِ این مرحله بحرانی نیست)
+            for key, val in (("host", ""), ("port", "0")):
+                try:
+                    _gsettings_set("org.gnome.system.proxy.socks", key, val)
+                except Exception:
+                    pass
             return True, "System proxy set to Automatic."
         except Exception as e:
             return False, str(e)
@@ -931,7 +977,7 @@ class MainWindow(QtWidgets.QWidget):
         bl.setContentsMargins(8, 6, 8, 6)
         bl.setSpacing(6)
         self.tabs = []
-        self._tab_icons = ["🏠", "📡", "⚙️"]
+        self._tab_icons = ["🏠", "❖", "⚙"]
         self._tab_keys = ["tab_home", "tab_servers", "tab_settings"]
         for i, icon in enumerate(self._tab_icons):
             b = QtWidgets.QPushButton(f"{icon}\n")
