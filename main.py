@@ -64,7 +64,7 @@ TR = {
         "f_key": "فایل کلید SSH:", "f_pass": "رمز عبور:", "f_extra": "تنظیمات اضافی:",
         "set_socks_chk": "تنظیم خودکار SOCKS سیستم هنگام اتصال",
         "save": "ذخیره", "cancel": "انصراف", "error": "خطا", "enter_ip": "IP سرور را وارد کن.",
-        "ph_name": "مثلاً سرور آلمان", "ph_ip": "172.86.88.222",
+        "ph_name": "مثلاً سرور آلمان", "ph_ip": "0.0.0.0",
         "ph_key": "~/.ssh/id_rsa  (پیشنهادی)",
         "ph_pass": "اختیاری — فقط اگر کلید نداری (با sshpass)",
         "ph_extra": "گزینه‌های اضافی ssh، مثلاً -o Compression=yes",
@@ -106,7 +106,7 @@ TR = {
         "f_key": "SSH key file:", "f_pass": "Password:", "f_extra": "Extra options:",
         "set_socks_chk": "Auto-set system SOCKS on connect",
         "save": "Save", "cancel": "Cancel", "error": "Error", "enter_ip": "Please enter the server IP.",
-        "ph_name": "e.g. Germany server", "ph_ip": "172.86.88.222",
+        "ph_name": "e.g. Germany server", "ph_ip": "0.0.0.0",
         "ph_key": "~/.ssh/id_rsa  (recommended)",
         "ph_pass": "optional — only if you have no key (uses sshpass)",
         "ph_extra": "extra ssh options, e.g. -o Compression=yes",
@@ -211,6 +211,16 @@ def qss(c: dict) -> str:
     QCheckBox::indicator {{ width: 18px; height: 18px; border-radius: 5px;
         border: 1px solid {c['border']}; background: {c['card']}; }}
     QCheckBox::indicator:checked {{ background: {c['accent']}; border-color: {c['accent']}; }}
+    QDialog {{ background: {c['bg']}; color: {c['text']}; }}
+    QDialog QLabel {{ color: {c['text']}; background: transparent; }}
+    QMessageBox {{ background: {c['bg']}; color: {c['text']}; }}
+    QMessageBox QLabel {{ color: {c['text']}; background: transparent; }}
+    QMessageBox QPushButton {{ background: {c['card2']}; color: {c['text']};
+        border: 1px solid {c['border']}; border-radius: 10px; padding: 7px 16px;
+        font-weight: 600; min-width: 70px; }}
+    QMessageBox QPushButton:hover {{ border-color: {c['accent']}; }}
+    QToolTip {{ background: {c['card2']}; color: {c['text']};
+        border: 1px solid {c['border']}; border-radius: 6px; padding: 4px 8px; }}
     """
 
 
@@ -691,10 +701,21 @@ class ServerDialog(QtWidgets.QDialog):
     def __init__(self, parent, theme, lang, prof=None):
         super().__init__(parent)
         t = TR[lang]
+        self._c = theme
         self.setWindowTitle(t["dlg_title"]);
         self.setModal(True);
         self.setMinimumWidth(430)
         self.setStyleSheet(qss(theme))
+        # اطمینان از اعمال رنگ پس‌زمینه روی خود پنجرهٔ دیالوگ
+        self.setAutoFillBackground(True)
+        pal = self.palette()
+        pal.setColor(QtGui.QPalette.Window, QtGui.QColor(theme["bg"]))
+        pal.setColor(QtGui.QPalette.WindowText, QtGui.QColor(theme["text"]))
+        pal.setColor(QtGui.QPalette.Base, QtGui.QColor(theme["card"]))
+        pal.setColor(QtGui.QPalette.Text, QtGui.QColor(theme["text"]))
+        pal.setColor(QtGui.QPalette.Button, QtGui.QColor(theme["card2"]))
+        pal.setColor(QtGui.QPalette.ButtonText, QtGui.QColor(theme["text"]))
+        self.setPalette(pal)
         self.setLayoutDirection(QtCore.Qt.RightToLeft if lang == "fa" else QtCore.Qt.LeftToRight)
         prof = prof or {}
         form = QtWidgets.QFormLayout(self)
@@ -742,7 +763,12 @@ class ServerDialog(QtWidgets.QDialog):
 
     def _accept(self):
         if not self.ip.text().strip():
-            QtWidgets.QMessageBox.warning(self, self._t["error"], self._t["enter_ip"]);
+            mb = QtWidgets.QMessageBox(self)
+            mb.setIcon(QtWidgets.QMessageBox.Warning)
+            mb.setWindowTitle(self._t["error"])
+            mb.setText(self._t["enter_ip"])
+            mb.setStyleSheet(qss(self._c))
+            mb.exec_()
             return
         self.accept()
 
@@ -905,7 +931,7 @@ class MainWindow(QtWidgets.QWidget):
         bl.setContentsMargins(8, 6, 8, 6)
         bl.setSpacing(6)
         self.tabs = []
-        self._tab_icons = ["🏠", "❖", "⚙"]
+        self._tab_icons = ["🏠", "📡", "⚙️"]
         self._tab_keys = ["tab_home", "tab_servers", "tab_settings"]
         for i, icon in enumerate(self._tab_icons):
             b = QtWidgets.QPushButton(f"{icon}\n")
@@ -1302,8 +1328,11 @@ class MainWindow(QtWidgets.QWidget):
             self.refresh_servers()
 
     def delete_server(self, pid):
-        if QtWidgets.QMessageBox.question(self, self.t("del_title"), self.t("del_q")) \
-                != QtWidgets.QMessageBox.Yes:
+        mb = self._msgbox(
+            QtWidgets.QMessageBox.Question,
+            self.t("del_title"), self.t("del_q"),
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
+        if mb.exec_() != QtWidgets.QMessageBox.Yes:
             return
         self.cfg["profiles"] = [p for p in self.servers() if p["id"] != pid]
         if self.cfg.get("active") == pid:
@@ -1397,7 +1426,8 @@ class MainWindow(QtWidgets.QWidget):
         else:
             p = self.active_server()
             if not p:
-                QtWidgets.QMessageBox.warning(self, APP_NAME, self.t("warn_pick"));
+                self._msgbox(QtWidgets.QMessageBox.Warning,
+                             APP_NAME, self.t("warn_pick")).exec_()
                 return
             self.tunnel.start(p)
 
@@ -1502,6 +1532,7 @@ class MainWindow(QtWidgets.QWidget):
             self.autossh_status.setStyleSheet(f"color:{c['danger']};")
 
     def check_autossh_installed(self):
+        c = THEMES[self.theme_name]
         self._autossh_installed = shutil.which("autossh") is not None
         if hasattr(self, "install_cmd"):
             self.install_cmd.setText(install_primary_command())
@@ -1514,6 +1545,9 @@ class MainWindow(QtWidgets.QWidget):
             m.setIcon(QtWidgets.QMessageBox.Warning)
             m.setText(self.t("inst_text"))
             m.setInformativeText(install_note(self.lang))
+            m.setStyleSheet(qss(c))
+            m.setLayoutDirection(
+                QtCore.Qt.RightToLeft if self.lang == "fa" else QtCore.Qt.LeftToRight)
             copy_btn = m.addButton(self.t("copy_install"), QtWidgets.QMessageBox.AcceptRole)
             m.addButton(self.t("ok"), QtWidgets.QMessageBox.RejectRole)
             m.exec_()
@@ -1522,6 +1556,19 @@ class MainWindow(QtWidgets.QWidget):
             self.switch_tab(2)
 
     # ───────── تم/مقیاس ─────────
+    def _msgbox(self, icon, title, text, buttons=QtWidgets.QMessageBox.Ok):
+        """ساخت QMessageBox هماهنگ با تم فعلی برنامه."""
+        c = THEMES[self.theme_name]
+        mb = QtWidgets.QMessageBox(self)
+        mb.setIcon(icon)
+        mb.setWindowTitle(title)
+        mb.setText(text)
+        mb.setStandardButtons(buttons)
+        mb.setStyleSheet(qss(c))
+        mb.setLayoutDirection(
+            QtCore.Qt.RightToLeft if self.lang == "fa" else QtCore.Qt.LeftToRight)
+        return mb
+
     def apply_theme(self):
         c = THEMES[self.theme_name]
         base_font = max(8, int(11 * self.scale / 100))
