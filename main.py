@@ -35,6 +35,7 @@ QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
 
 APP_NAME = "SSH Tunnel Manager"
 APP_SLUG = "ssh-tunnel-manager"
+APP_VERSION = "1.2.1"
 CONFIG_DIR = Path.home() / ".config" / APP_SLUG
 _OLD_CONFIG_DIR = Path.home() / ".config" / "autossh-manager"
 # مهاجرت خودکار از نام قدیمی تا داده‌های کاربر (سرورها/تنظیمات) از دست نرود
@@ -51,6 +52,7 @@ TR = {
         "tab_home": "خانه", "tab_servers": "سرورها", "tab_settings": "تنظیمات",
         "status_off": "قطع", "status_connecting": "در حال اتصال…",
         "status_on": "متصل", "status_error": "خطا",
+        "status_reconnecting": "در حال اتصال مجدد…",
         "no_server": "سروری نیست", "pick_hint": "از تب سرورها یکی بساز",
         "info_server": "سرور", "info_tunnel": "پورت تونل (SOCKS)", "info_socks": "SOCKS سیستم",
         "btn_set_socks": "تنظیم SOCKS سیستم", "btn_auto_proxy": "حالت خودکار (Automatic)",
@@ -67,6 +69,8 @@ TR = {
         "toggle_theme": "تغییر روشن/تاریک", "language": "زبان برنامه:",
         "cleanup_hint": "بستن همهٔ تونل‌هایی که توسط همین برنامه ساخته شده‌اند:",
         "pkill": "بستن تونل‌های برنامه",
+        "pkill_done": "{n} تونلِ ساخته‌شده توسط برنامه بسته شد و پراکسی سیستم به حالت خودکار بازگشت.",
+        "pkill_none": "هیچ تونلِ فعالی که توسط این برنامه ساخته شده باشد پیدا نشد.",
         "logs_title": "لاگ‌های اتصال",
         "startup_title": "راه‌اندازی خودکار",
         "autostart_chk": "اجرای برنامه هنگام روشن‌شدن سیستم",
@@ -89,7 +93,7 @@ TR = {
         "verify_ssh255": "❌ ssh با خطای 255 خارج شد؛ اتصال ناموفق بود.",
         "dlg_title": "سرور", "f_name": "نام سرور:", "f_ip": "IP سرور:",
         "f_user": "کاربر:", "f_ssh": "پورت اتصال به سرور (SSH):",
-        "f_dyn": "پورت تونل (-D):", "f_mon": "پورت مانیتور (-M):",
+        "f_dyn": "پورت تونل (-D):", "f_mon": "پورت مانیتور (-M، ۰=خاموش، پیشنهادی):",
         "f_key": "فایل کلید SSH:", "f_pass": "رمز عبور:", "f_extra": "تنظیمات اضافی:",
         "set_socks_chk": "تنظیم خودکار SOCKS سیستم هنگام اتصال",
         "save": "ذخیره", "cancel": "انصراف", "error": "خطا", "enter_ip": "IP سرور را وارد کن.",
@@ -112,6 +116,7 @@ TR = {
         "tab_home": "Home", "tab_servers": "Servers", "tab_settings": "Settings",
         "status_off": "Disconnected", "status_connecting": "Connecting…",
         "status_on": "Connected", "status_error": "Error",
+        "status_reconnecting": "Reconnecting…",
         "no_server": "No server", "pick_hint": "Create one in the Servers tab",
         "info_server": "Server", "info_tunnel": "Tunnel port (SOCKS)", "info_socks": "System SOCKS",
         "btn_set_socks": "Set system SOCKS", "btn_auto_proxy": "Automatic mode",
@@ -128,6 +133,8 @@ TR = {
         "toggle_theme": "Toggle light/dark", "language": "Language:",
         "cleanup_hint": "Close all tunnels started by this app:",
         "pkill": "Close app tunnels",
+        "pkill_done": "Closed {n} tunnel(s) created by this app and reset the system proxy to Automatic.",
+        "pkill_none": "No active tunnels created by this app were found.",
         "logs_title": "Connection logs",
         "startup_title": "Startup",
         "autostart_chk": "Start app when the system boots",
@@ -150,7 +157,7 @@ TR = {
         "verify_ssh255": "❌ ssh exited with status 255; connection failed.",
         "dlg_title": "Server", "f_name": "Server name:", "f_ip": "Server IP:",
         "f_user": "User:", "f_ssh": "Server SSH port:",
-        "f_dyn": "Tunnel port (-D):", "f_mon": "Monitor port (-M):",
+        "f_dyn": "Tunnel port (-D):", "f_mon": "Monitor port (-M, 0=off, recommended):",
         "f_key": "SSH key file:", "f_pass": "Password:", "f_extra": "Extra options:",
         "set_socks_chk": "Auto-set system SOCKS on connect",
         "save": "Save", "cancel": "Cancel", "error": "Error", "enter_ip": "Please enter the server IP.",
@@ -408,22 +415,37 @@ class TunnelController(QtCore.QObject):
         self._fwd_failed = False      # forwarding پورت مانیتور خراب است؟
         self._verify_tries = 0
         self._stopping = False
+        self._health_fails = 0        # شمارندهٔ شکست‌های پیاپیِ پایش سلامت
+        self._reconnecting = False    # آیا هم‌اکنون در حال اتصال مجدد است؟
         self._verify_timer = QtCore.QTimer(self)
         self._verify_timer.setSingleShot(True)
         self._verify_timer.timeout.connect(self._verify_step)
+        # پایش دورهٔ سلامت تونل پس از برقراری (هر ۸ ثانیه)
+        self._health_timer = QtCore.QTimer(self)
+        self._health_timer.setInterval(8000)
+        self._health_timer.timeout.connect(self._health_check)
 
     def build_command(self, prof):
         ip = prof.get("ip", "").strip()
         user = prof.get("user", "root").strip() or "root"
         ssh_port = str(prof.get("ssh_port", "22")).strip() or "22"
         dyn = str(prof.get("dyn_port", "1085")).strip() or "1085"
-        mon = str(prof.get("mon_port", "1086")).strip() or "1086"
+        # پورت مانیتور (-M): پیش‌فرض 0 (غیرفعال). مکانیزم remote-forwardِ -M
+        # باعث خطای «remote port forwarding failed» و حلقهٔ ری‌استارت می‌شد،
+        # چون پس از هر قطعی پورت روی سرور بلافاصله آزاد نمی‌شد. به‌جای آن از
+        # ServerAlive خودِ ssh برای تشخیص قطعی استفاده می‌کنیم.
+        mon = str(prof.get("mon_port", "0")).strip() or "0"
         key = prof.get("key", "").strip()
         extra = prof.get("extra", "").strip()
         password = prof.get("password", "")
         cmd = ["autossh", "-M", mon, "-D", dyn, "-N",
-               "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3",
-               "-o", "StrictHostKeyChecking=accept-new", "-o", "ExitOnForwardFailure=yes",
+               # تشخیص سریع قطعی و تلاش پایدار برای اتصال مجدد
+               "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
+               "-o", "ExitOnForwardFailure=yes",
+               "-o", "StrictHostKeyChecking=accept-new",
+               "-o", "TCPKeepAlive=yes",
+               "-o", "ConnectTimeout=10",
+               "-o", "ConnectionAttempts=3",
                "-p", ssh_port]
         if key:
             cmd += ["-i", os.path.expanduser(key)]
@@ -436,9 +458,12 @@ class TunnelController(QtCore.QObject):
         return cmd, use_sshpass
 
     def start(self, prof):
+        # اگر فرایندی از قبل هست، ابتدا کامل ببندش تا چند تونل هم‌زمان روی هم
+        # جمع نشوند و حافظه را پر نکنند.
         if self.proc is not None:
-            self.log.emit("⚠️  Tunnel already running.")
-            return
+            if self.proc.state() == QtCore.QProcess.Running:
+                self.log.emit("⚠️  Existing tunnel found; closing it before reconnecting…")
+            self.stop()
         if not shutil.which("autossh"):
             self.state = "error";
             self.state_changed.emit("error")
@@ -456,8 +481,12 @@ class TunnelController(QtCore.QObject):
         self._fwd_failed = False
         self._verify_tries = 0
         self._stopping = False
+        self._health_fails = 0
+        self._reconnecting = False
         self._dyn_port = int(str(prof.get("dyn_port", "1085")).strip() or "1085")
-        self._mon_port = int(str(prof.get("mon_port", "1086")).strip() or "1086")
+        self._mon_port = int(str(prof.get("mon_port", "0")).strip() or "0")
+        # اطمینان از آزاد بودن پورت محلیِ SOCKS پیش از اجرا (جلوگیری از تداخل)
+        self._ensure_local_port_free(self._dyn_port, timeout_ms=1500)
         self.log.emit("───────────────────────────")
         shown = list(cmd)
         if use_sshpass:
@@ -504,10 +533,15 @@ class TunnelController(QtCore.QObject):
             # "ok" = CONNECT کامل موفق؛ "handshake" = پراکسی SOCKS زنده است
             if res in ("ok", "handshake") and not self._fwd_failed:
                 self._verified = True
+                self._health_fails = 0
+                self._reconnecting = False
                 self.state = "on"
                 self.state_changed.emit("on")
                 detail = "SOCKS verified" if res == "ok" else "SOCKS responding"
                 self.log.emit(f"✅ Tunnel established ({detail}).")
+                # شروع پایش دوره‌ای سلامت
+                if not self._health_timer.isActive():
+                    self._health_timer.start()
                 return
         # هنوز آماده نیست → تلاش مجدد تا حدود ۲۰ ثانیه
         self._verify_tries += 1
@@ -516,7 +550,55 @@ class TunnelController(QtCore.QObject):
             return
         self._verify_timer.start(1500)
 
+    def _health_check(self):
+        """پایش دوره‌ای پس از برقراری. اگر تونل واقعاً قطع شده باشد، UI را به
+        حالت «در حال اتصال مجدد» می‌برد (نه متصلِ دروغین) و می‌گذارد autossh
+        خودش ssh را بازسازی کند؛ با سالم‌شدن دوباره، به «متصل» برمی‌گردد."""
+        if self._stopping or self.proc is None or not self._verified:
+            return
+        # اگر فرایند autossh کلاً مرده، پایش را متوقف کن (on_finished رسیدگی می‌کند)
+        if self.proc.state() != QtCore.QProcess.Running:
+            return
+        alive = socks_port_listening(self._dyn_port) and \
+            socks5_handshake_ok(self._dyn_port) in ("ok", "handshake")
+        if alive:
+            if self._health_fails or self._reconnecting:
+                self.log.emit("✅ Tunnel healthy again.")
+            self._health_fails = 0
+            if self._reconnecting:
+                self._reconnecting = False
+                self.state = "on"
+                self.state_changed.emit("on")
+            return
+        # ناموفق: شمارنده را زیاد کن
+        self._health_fails += 1
+        if self._health_fails == 1:
+            self.log.emit("⚠️  Tunnel not responding; checking…")
+        if self._health_fails >= 2 and not self._reconnecting:
+            # تونل واقعاً افتاده → نمایش وضعیت اتصال مجدد (autossh خودش بازسازی می‌کند)
+            self._reconnecting = True
+            self.state = "reconnecting"
+            self.state_changed.emit("reconnecting")
+            self.log.emit("🔄 Reconnecting…")
+        # اگر خیلی طولانی شد (مثلاً ~۲ دقیقه)، فرایند ssh را به‌زور تازه کن
+        if self._health_fails >= 15 and self.proc is not None:
+            self.log.emit("🔁 Forcing ssh restart…")
+            self._restart_ssh_child()
+            self._health_fails = 3  # شمارنده را کمی پایین بیاور تا فوراً دوباره فشار نیاورد
+
+    def _restart_ssh_child(self):
+        """به autossh سیگنال می‌دهد فرزند ssh را بازسازی کند (SIGUSR1)؛
+        autossh با دریافت این سیگنال، اتصال ssh را از نو برقرار می‌کند."""
+        if not hasattr(signal, "SIGUSR1"):
+            return  # ویندوز این سیگنال را ندارد؛ autossh خودش بازسازی می‌کند
+        try:
+            if self.proc is not None and self.proc.processId():
+                os.kill(int(self.proc.processId()), signal.SIGUSR1)
+        except Exception as e:
+            self.log.emit(f"⚠️  restart signal failed: {e}")
+
     def _fail(self, msg_key):
+        """اعلام شکستِ واقعیِ اتصال، نمایش پیام و بستن تمیزِ تونلِ معیوب."""
         if self.state == "error":
             return
         self.log.emit("❌ Connection verification failed.")
@@ -524,6 +606,7 @@ class TunnelController(QtCore.QObject):
         # تونل ناموفق را پاک می‌بندیم تا فرایند معیوب باقی نماند
         self._stopping = True
         self._verify_timer.stop()
+        self._health_timer.stop()
         if self.proc is not None:
             try:
                 self.proc.terminate()
@@ -559,6 +642,7 @@ class TunnelController(QtCore.QObject):
 
     def _on_finished(self, code, _status):
         self._verify_timer.stop()
+        self._health_timer.stop()
         self.log.emit(f"■ autossh exited (code {code}).")
         if self._pid:
             self.pid_stopped.emit(self._pid);
@@ -579,6 +663,8 @@ class TunnelController(QtCore.QObject):
     def stop(self):
         self._stopping = True
         self._verify_timer.stop()
+        self._health_timer.stop()
+        dyn = self._dyn_port
         if self.proc is not None:
             self.log.emit("⏹  Stopping tunnel…")
             self.proc.terminate()
@@ -590,9 +676,34 @@ class TunnelController(QtCore.QObject):
             self.pid_stopped.emit(self._pid);
             self._pid = 0
         self._verified = False
+        self._reconnecting = False
+        self._health_fails = 0
+        # مطمئن شو پورت محلیِ SOCKS واقعاً آزاد شده تا اتصال بعدی فوراً موفق شود
+        if dyn:
+            self._ensure_local_port_free(dyn)
         self._stopping = False
         self.state = "off";
         self.state_changed.emit("off")
+
+    def _ensure_local_port_free(self, port, timeout_ms=3000):
+        """منتظر می‌ماند تا پورت محلی آزاد شود؛ اگر فرایندی هنوز آن را گرفته
+        (مثلاً فرزند ssh که دیر بسته)، آن را می‌کشد تا اتصال مجددِ سریع ممکن شود."""
+        import time as _t
+        deadline = _t.time() + timeout_ms / 1000.0
+        while _t.time() < deadline:
+            if not socks_port_listening(port, timeout=0.3):
+                return True
+            _t.sleep(0.2)
+        # هنوز اشغال است → تلاش برای کشتنِ نگه‌دارندهٔ پورت
+        try:
+            out = subprocess.run(
+                ["bash", "-lc", f"fuser -k {port}/tcp 2>/dev/null || true"],
+                capture_output=True, timeout=3)
+            _ = out
+        except Exception:
+            pass
+        _t.sleep(0.3)
+        return not socks_port_listening(port, timeout=0.3)
 
 
 # ════════════════════════════ تشخیص سیستم‌عامل ════════════════════════════
@@ -1139,7 +1250,7 @@ class ServerRow(QtWidgets.QWidget):
         name.setObjectName("h2")
         sub = QtWidgets.QLabel(
             f"{prof.get('user', 'root')}@{prof.get('ip', '—')}:{prof.get('ssh_port', '22')}"
-            f"   •   D{prof.get('dyn_port', '1085')}  M{prof.get('mon_port', '1086')}")
+            f"   •   D{prof.get('dyn_port', '1085')}  M{prof.get('mon_port', '0')}")
         sub.setObjectName("muted");
         sub.setStyleSheet("font-size:11px;")
         info.addWidget(name);
@@ -1191,7 +1302,8 @@ class ServerDialog(QtWidgets.QDialog):
         self.user = QtWidgets.QLineEdit(prof.get("user", "root"))
         self.ssh_port = QtWidgets.QLineEdit(str(prof.get("ssh_port", "22")))
         self.dyn_port = QtWidgets.QLineEdit(str(prof.get("dyn_port", "1085")))
-        self.mon_port = QtWidgets.QLineEdit(str(prof.get("mon_port", "1086")))
+        self.mon_port = QtWidgets.QLineEdit(str(prof.get("mon_port", "0")))
+        self.mon_port.setPlaceholderText("0")
         self.key = QtWidgets.QLineEdit(prof.get("key", ""));
         self.key.setPlaceholderText(t["ph_key"])
         self.password = QtWidgets.QLineEdit(prof.get("password", ""))
@@ -1214,9 +1326,12 @@ class ServerDialog(QtWidgets.QDialog):
         btns = QtWidgets.QHBoxLayout()
         ok = QtWidgets.QPushButton(t["save"]);
         ok.setObjectName("primaryBtn");
+        ok.setCursor(QtCore.Qt.PointingHandCursor)
         ok.clicked.connect(self._accept)
         cancel = QtWidgets.QPushButton(t["cancel"]);
+        cancel.setCursor(QtCore.Qt.PointingHandCursor)
         cancel.clicked.connect(self.reject)
+        self.set_socks.setCursor(QtCore.Qt.PointingHandCursor)
         btns.addStretch(1);
         btns.addWidget(cancel);
         btns.addWidget(ok)
@@ -1243,7 +1358,7 @@ class ServerDialog(QtWidgets.QDialog):
             "user": self.user.text().strip() or "root",
             "ssh_port": self.ssh_port.text().strip() or "22",
             "dyn_port": self.dyn_port.text().strip() or "1085",
-            "mon_port": self.mon_port.text().strip() or "1086",
+            "mon_port": self.mon_port.text().strip() or "0",
             "key": self.key.text().strip(),
             "password": self.password.text(),
             "extra": self.extra.text().strip(),
@@ -1319,12 +1434,35 @@ class MainWindow(QtWidgets.QWidget):
             pass
 
     def _maybe_autoconnect(self):
-        if self.tunnel.state in ("on", "connecting"):
+        if self.tunnel.state in ("on", "connecting", "reconnecting"):
             return
         p = self.active_server()
         if p and shutil.which("autossh"):
+            self._cleanup_orphan_tunnels()
             self.on_log("▶ Auto-connecting to last server…")
             self.tunnel.start(p)
+
+    def _cleanup_orphan_tunnels(self):
+        """پیش از باز کردن تونل جدید، تونل‌های یتیمِ به‌جامانده از اجرای قبلی
+        (که در config ردیابی شده‌اند) را می‌بندد تا چند فرایند روی هم جمع
+        نشوند و حافظهٔ سیستم پر نشود."""
+        live_pid = int(self.tunnel.proc.processId()) if self.tunnel.proc else 0
+        n = 0
+        for x in list(self._tracked_pids()):
+            try:
+                pid = int(x)
+            except Exception:
+                continue
+            if pid and pid != live_pid and _pid_is_autossh(pid):
+                if kill_pid_tree(pid):
+                    n += 1
+                if OS != "windows":
+                    force_kill_pid(pid)
+        if n:
+            self.on_log(f"🧹 Cleaned {n} leftover tunnel(s) before connecting.")
+        # فهرست ردیابی را به فرایند زنده محدود کن
+        self.cfg["tracked_pids"] = [live_pid] if live_pid else []
+        self.save_config()
 
     def t(self, key):
         return TR[self.lang][key]
@@ -1406,6 +1544,25 @@ class MainWindow(QtWidgets.QWidget):
 
         v.addWidget(self._tabbar())
         self.grip = QtWidgets.QSizeGrip(self.root)
+        # نشانگر دست (pointer) برای همهٔ کنترل‌های قابل‌کلیک
+        self._apply_pointer_cursors()
+
+    def _apply_pointer_cursors(self):
+        """نشانگر موس را روی همهٔ ویجت‌های تعاملی به حالت دست تنظیم می‌کند."""
+        types = (QtWidgets.QPushButton, QtWidgets.QCheckBox,
+                 QtWidgets.QRadioButton, QtWidgets.QComboBox,
+                 QtWidgets.QSlider, QtWidgets.QToolButton)
+        for w in self.findChildren(QtWidgets.QWidget):
+            if isinstance(w, types):
+                w.setCursor(QtCore.Qt.PointingHandCursor)
+        # دکمهٔ پاور و برچسب‌های کلیک‌پذیرِ چک‌باکس‌ها
+        if hasattr(self, "power"):
+            self.power.setCursor(QtCore.Qt.PointingHandCursor)
+        for lbl in (getattr(self, "autostart_lbl", None),
+                    getattr(self, "autoconnect_lbl", None),
+                    getattr(self, "term_proxy_lbl", None)):
+            if lbl is not None:
+                lbl.setCursor(QtCore.Qt.PointingHandCursor)
 
     # ───────── باز/بستن کشوی لاگ ─────────
     def toggle_logs(self):
@@ -1743,6 +1900,11 @@ class MainWindow(QtWidgets.QWidget):
         c3l.addWidget(self.pkill_btn)
         l.addWidget(c3);
         l.addStretch(1)
+        # نسخهٔ برنامه در پایان لیست
+        self.version_lbl = QtWidgets.QLabel(f"{APP_NAME} v{APP_VERSION}")
+        self.version_lbl.setObjectName("muted")
+        self.version_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        l.addWidget(self.version_lbl)
         # دکمه‌ها بتوانند در عرض کم جمع شوند (به‌جای پهن‌نگه‌داشتن کارت)
         for b in (self.copy_btn, self.recheck_btn, self.theme_toggle_btn,
                   self.term_proxy_copy_btn, self.pkill_btn):
@@ -1869,6 +2031,7 @@ class MainWindow(QtWidgets.QWidget):
         if p:
             tip += f"{p['name']} — {p['user']}@{p['ip']}\n"
         tip += {"on": "● " + self.t("status_on"), "connecting": "● " + self.t("status_connecting"),
+                "reconnecting": "● " + self.t("status_reconnecting"),
                 "error": "● " + self.t("status_error")}.get(st, "○ " + self.t("status_off"))
         self.tray.setToolTip(tip)
 
@@ -2024,7 +2187,7 @@ class MainWindow(QtWidgets.QWidget):
 
     # ───────── اتصال/قطع ─────────
     def toggle_tunnel(self):
-        if self.tunnel.state in ("on", "connecting"):
+        if self.tunnel.state in ("on", "connecting", "reconnecting"):
             self.tunnel.stop()
             # revert از طریق on_state("off") انجام می‌شود
         else:
@@ -2033,6 +2196,7 @@ class MainWindow(QtWidgets.QWidget):
                 self._msgbox(QtWidgets.QMessageBox.Warning,
                              APP_NAME, self.t("warn_pick")).exec_()
                 return
+            self._cleanup_orphan_tunnels()
             self.tunnel.start(p)
 
     def _revert_all_proxy(self):
@@ -2132,6 +2296,13 @@ class MainWindow(QtWidgets.QWidget):
             self.power.set_state("busy", c["busy"])
             self.status_lbl.setText(self.t("status_connecting"))
             self.status_lbl.setStyleSheet(f"color:{c['busy']};")
+        elif state == "reconnecting":
+            # تونل موقتاً افتاده ولی autossh در حال بازسازی است؛ پراکسی را
+            # برنمی‌گردانیم چون انتظار داریم به‌زودی دوباره وصل شود.
+            self.power.set_state("busy", c["busy"])
+            self.status_lbl.setText(self.t("status_reconnecting"))
+            self.status_lbl.setStyleSheet(f"color:{c['busy']};")
+            self.dot.setStyleSheet(f"color:{c['busy']}; font-size:14px;")
         elif state == "error":
             self.power.set_state("off", c["danger"])
             self.status_lbl.setText(self.t("status_error"))
@@ -2196,9 +2367,21 @@ class MainWindow(QtWidgets.QWidget):
             self.on_log(f"🧹 {n} app tunnel(s) closed.")
         else:
             self.on_log("ℹ️ No app-created tunnel to close.")
+        # بازگرداندن پراکسی سیستم و ترمینال به حالت اولیه
         ok, msg = set_system_proxy_auto()
         self.on_log(self._proxy_msg(ok, msg))
+        if self.cfg.get("term_proxy", False):
+            tok, tmsg = clear_terminal_proxy()
+            self.on_log(self._proxy_msg(tok, tmsg))
+        self._proxy_applied = False
         self.update_socks_row()
+        # پیام مناسب به کاربر (چون ممکن است کشوی لاگ بسته باشد)
+        if n:
+            self._msgbox(QtWidgets.QMessageBox.Information, self.t("pkill"),
+                         self.t("pkill_done").format(n=n)).exec_()
+        else:
+            self._msgbox(QtWidgets.QMessageBox.Information, self.t("pkill"),
+                         self.t("pkill_none")).exec_()
 
     def manual_set_socks(self):
         p = self.active_server()
@@ -2324,10 +2507,27 @@ class MainWindow(QtWidgets.QWidget):
     def load_config(self):
         try:
             if CONFIG_FILE.exists():
-                return json.loads(CONFIG_FILE.read_text("utf-8"))
+                cfg = json.loads(CONFIG_FILE.read_text("utf-8"))
+                cfg = self._migrate_config(cfg)
+                return cfg
         except Exception:
             pass
         return {"profiles": [], "active": None, "theme": "light", "scale": 100, "lang": "fa"}
+
+    def _migrate_config(self, cfg):
+        """مهاجرت یک‌بارهٔ تنظیمات قدیمی: غیرفعال‌کردن پورت مانیتورِ -M که
+        باعث خطای «remote port forwarding failed» و حلقهٔ ری‌استارت می‌شد.
+        معماری جدید برای تشخیص قطعی به ServerAlive و پایش SOCKS تکیه دارد."""
+        try:
+            if not cfg.get("_migrated_mon0"):
+                for p in cfg.get("profiles", []):
+                    # هر مقدار مانیتورِ قدیمی را به 0 (خاموش) ببر
+                    if str(p.get("mon_port", "0")).strip() not in ("", "0"):
+                        p["mon_port"] = "0"
+                cfg["_migrated_mon0"] = True
+        except Exception:
+            pass
+        return cfg
 
     def save_config(self):
         try:

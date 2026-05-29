@@ -1,6 +1,6 @@
 [project]
 name = "ssh_tunnel_manager"
-version = "1.1.0"
+version = "1.2.1"
 description = "A cross-platform GUI manager for SSH tunneling built with PyQt5. It provides a simple, one-click interface to manage multiple SSH proxy connections, automate system SOCKS proxy settings, and ensure stable tunnels using autossh."
 readme = "README.md"
 requires-python = "==3.13.*"
