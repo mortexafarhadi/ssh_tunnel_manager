@@ -1,6 +1,6 @@
 [project]
 name = "ssh_tunnel_manager"
-version = "1.0.5"
+version = "1.1.0"
 description = "A cross-platform GUI manager for SSH tunneling built with PyQt5. It provides a simple, one-click interface to manage multiple SSH proxy connections, automate system SOCKS proxy settings, and ensure stable tunnels using autossh."
 readme = "README.md"
 requires-python = "==3.13.*"
@@ -14,12 +14,3 @@ dependencies = [
     "pyqt5-sip==12.18.*",
     "setuptools==82.0.*",
 ]
-
-#[[tool.uv.index]]
-#name = "parspack"
-#url = "https://mirror.abrha.net/repository/pypi/simple"
-#name = "runflare"
-#url = "https://mirror-pypi.runflare.com/simple"
-#name = "liara"
-#url = "https://package-mirror.liara.ir/repository/pypi/simple"
-#default = true

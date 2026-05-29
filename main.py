@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AutoSSH Manager — رابط گرافیکی PyQt5 برای مدیریت تونل SOCKS با autossh.
+SSH Tunnel Manager — رابط گرافیکی PyQt5 برای مدیریت تونل SOCKS با autossh.
 A friendly PyQt5 GUI to manage a SOCKS tunnel via autossh (Ubuntu/Linux).
 
 ویژگی‌ها / Features:
@@ -21,6 +21,8 @@ import os
 import platform
 import shutil
 import signal
+import socket
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -31,8 +33,16 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
 QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
 
-APP_NAME = "AutoSSH Manager"
-CONFIG_DIR = Path.home() / ".config" / "autossh-manager"
+APP_NAME = "SSH Tunnel Manager"
+APP_SLUG = "ssh-tunnel-manager"
+CONFIG_DIR = Path.home() / ".config" / APP_SLUG
+_OLD_CONFIG_DIR = Path.home() / ".config" / "autossh-manager"
+# مهاجرت خودکار از نام قدیمی تا داده‌های کاربر (سرورها/تنظیمات) از دست نرود
+try:
+    if _OLD_CONFIG_DIR.exists() and not CONFIG_DIR.exists():
+        _OLD_CONFIG_DIR.rename(CONFIG_DIR)
+except Exception:
+    pass
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 # ════════════════════════════ ترجمه‌ها / Translations ════════════════════════
@@ -57,7 +67,26 @@ TR = {
         "toggle_theme": "تغییر روشن/تاریک", "language": "زبان برنامه:",
         "cleanup_hint": "بستن همهٔ تونل‌هایی که توسط همین برنامه ساخته شده‌اند:",
         "pkill": "بستن تونل‌های برنامه",
-        "logs_title": "لاگ‌های autossh",
+        "logs_title": "لاگ‌های اتصال",
+        "startup_title": "راه‌اندازی خودکار",
+        "autostart_chk": "اجرای برنامه هنگام روشن‌شدن سیستم",
+        "autoconnect_chk": "اتصال خودکار به آخرین سرور هنگام اجرا",
+        "term_proxy_title": "پراکسی ترمینال / کل سیستم",
+        "term_proxy_chk": "هدایت ترمینال به تونل هنگام اتصال (خودکار)",
+        "term_proxy_hint": ("با فعال‌بودن این گزینه، هنگام اتصالِ تونل متغیرهای محیطی پراکسی نوشته "
+                            "می‌شوند و هنگام قطع، خودکار پاک می‌شوند؛ پس اینترنت معمولی سیستم در حالت "
+                            "قطع مختل نمی‌شود. برنامه همچنین خطِ لازم را به‌صورت خودکار به فایل‌های شِل "
+                            "(.bashrc/.zshrc/.profile) اضافه/حذف می‌کند.\n"
+                            "⚠️ توجه: متغیرهای محیطی فقط روی ترمینال‌هایی اثر می‌گذارند که «بعد از» تغییر "
+                            "باز می‌شوند. برای ترمینال‌هایِ همین‌حالا باز، یک‌بار `source ~/.bashrc` بزن یا "
+                            "ترمینال تازه باز کن. کل سیستم به‌صورت شفاف (همهٔ برنامه‌ها) بدون مسیریابی TUN "
+                            "ممکن نیست؛ این روش ترمینال و ابزارهای خط‌فرمان را پوشش می‌دهد."),
+        "term_proxy_copy": "کپی دستور بازخوانی (source ~/.bashrc)",
+        "term_proxy_reload_hint": "خط لازم خودکار به فایل‌های شِل اضافه شد. برای ترمینال‌هایِ همین‌حالا باز، یک‌بار `source ~/.bashrc` بزن یا ترمینال تازه باز کن.",
+        "verifying": "در حال بررسی تونل…",
+        "verify_fail": "❌ تونل برقرار نشد: پورت SOCKS پاسخ نمی‌دهد.",
+        "verify_fwd_fail": "❌ خطای forwarding پورت مانیتور ({m}). این پورت روی سرور آزاد نیست. تونل برقرار نشد.\nراه‌حل: پورت مانیتور (-M) را در تنظیمات سرور به 0 تغییر بده یا پورت دیگری انتخاب کن.",
+        "verify_ssh255": "❌ ssh با خطای 255 خارج شد؛ اتصال ناموفق بود.",
         "dlg_title": "سرور", "f_name": "نام سرور:", "f_ip": "IP سرور:",
         "f_user": "کاربر:", "f_ssh": "پورت اتصال به سرور (SSH):",
         "f_dyn": "پورت تونل (-D):", "f_mon": "پورت مانیتور (-M):",
@@ -99,7 +128,26 @@ TR = {
         "toggle_theme": "Toggle light/dark", "language": "Language:",
         "cleanup_hint": "Close all tunnels started by this app:",
         "pkill": "Close app tunnels",
-        "logs_title": "autossh logs",
+        "logs_title": "Connection logs",
+        "startup_title": "Startup",
+        "autostart_chk": "Start app when the system boots",
+        "autoconnect_chk": "Auto-connect to the last server on launch",
+        "term_proxy_title": "Terminal / system-wide proxy",
+        "term_proxy_chk": "Route the terminal through the tunnel on connect (automatic)",
+        "term_proxy_hint": ("When enabled, proxy env vars are written on connect and cleared on "
+                            "disconnect, so your normal internet isn't broken while the tunnel is off. "
+                            "The app also adds/removes the needed line in your shell startup files "
+                            "(.bashrc/.zshrc/.profile) automatically.\n"
+                            "⚠️ Note: env vars only affect terminals opened AFTER the change. For "
+                            "terminals already open, run `source ~/.bashrc` once or open a new terminal. "
+                            "Truly system-wide (every app) routing needs TUN routing and isn't done here; "
+                            "this covers the terminal and command-line tools."),
+        "term_proxy_copy": "Copy reload command (source ~/.bashrc)",
+        "term_proxy_reload_hint": "The shell line was added automatically. For terminals already open, run `source ~/.bashrc` once or open a new terminal.",
+        "verifying": "Verifying tunnel…",
+        "verify_fail": "❌ Tunnel not established: SOCKS port is not responding.",
+        "verify_fwd_fail": "❌ Monitor port forwarding failed ({m}). That port isn't free on the server. Tunnel not established.\nFix: set the monitor port (-M) to 0 in the server settings, or pick a different port.",
+        "verify_ssh255": "❌ ssh exited with status 255; connection failed.",
         "dlg_title": "Server", "f_name": "Server name:", "f_ip": "Server IP:",
         "f_user": "User:", "f_ssh": "Server SSH port:",
         "f_dyn": "Tunnel port (-D):", "f_mon": "Monitor port (-M):",
@@ -203,6 +251,8 @@ def qss(c: dict) -> str:
     QSlider::groove:horizontal {{ height: 6px; background: {c['border']}; border-radius: 3px; }}
     QSlider::handle:horizontal {{ background: {c['accent']}; width: 18px; height: 18px;
         margin: -7px 0; border-radius: 9px; }}
+    QScrollArea {{ background: transparent; border: none; }}
+    QScrollArea > QWidget > QWidget {{ background: transparent; }}
     QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
     QScrollBar::handle:vertical {{ background: {c['border']}; border-radius: 5px; min-height: 30px; }}
     QScrollBar::handle:vertical:hover {{ background: {c['muted']}; }}
@@ -287,18 +337,80 @@ class PowerButton(QtWidgets.QAbstractButton):
         p.end()
 
 
+# ════════════════════════════ بررسی واقعیِ سلامت تونل ════════════════════════════
+def socks_port_listening(port, host="127.0.0.1", timeout=1.0):
+    """آیا چیزی روی پورت SOCKS گوش می‌دهد؟ (اتصال TCP ساده)"""
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+def socks5_handshake_ok(port, host="127.0.0.1", timeout=2.5):
+    """یک دست‌دادهٔ SOCKS5 انجام می‌دهد و سپس درخواست CONNECT به یک مقصد
+    آزمایشی می‌فرستد تا مطمئن شویم تونل واقعاً از سرِ دیگر هم کار می‌کند.
+
+    خروجی: "ok" اگر CONNECT موفق شد، "handshake" اگر فقط negotiation کار کرد
+    (مثلاً مقصد آزمایشی بسته بود ولی تونل برقرار است)، و "" اگر کلاً شکست خورد.
+
+    اگر فقط TCP وصل شود ولی forwarding سمت سرور خراب باشد، ssh معمولاً
+    اتصال SOCKS را می‌بندد یا negotiation شکست می‌خورد؛ آن حالت تشخیص داده می‌شود.
+    """
+    for target_ip in ("1.1.1.1", "8.8.8.8"):
+        try:
+            s = socket.create_connection((host, int(port)), timeout=timeout)
+        except Exception:
+            return ""
+        try:
+            s.settimeout(timeout)
+            s.sendall(b"\x05\x01\x00")  # VER=5, NMETHODS=1, METHOD=0
+            resp = s.recv(2)
+            if len(resp) < 2 or resp[0] != 0x05 or resp[1] == 0xFF:
+                return ""
+            req = b"\x05\x01\x00\x01" + socket.inet_aton(target_ip) + struct.pack(">H", 80)
+            s.sendall(req)
+            rep = s.recv(10)
+            if len(rep) >= 2 and rep[0] == 0x05 and rep[1] == 0x00:
+                return "ok"
+            # negotiation کار کرد ولی این مقصد در دسترس نبود → مقصد بعدی
+        except Exception:
+            return ""
+        finally:
+            try:
+                s.close()
+            except Exception:
+                pass
+    # هر دو مقصد negotiation را رد کردند ولی پاسخ SOCKS معتبر گرفتیم
+    return "handshake"
+
+
 # ════════════════════════════ کنترلر autossh ════════════════════════════
 class TunnelController(QtCore.QObject):
     log = QtCore.pyqtSignal(str)
     state_changed = QtCore.pyqtSignal(str)
     pid_started = QtCore.pyqtSignal(int)  # PID تونلِ ساخته‌شده توسط برنامه
     pid_stopped = QtCore.pyqtSignal(int)  # PID تونلی که پایان یافت
+    failed = QtCore.pyqtSignal(str)       # کلید پیام شکست برای نمایش/ترجمه
+
+    # الگوهای متنی که نشان‌دهندهٔ شکست واقعی اتصال‌اند
+    _FWD_FAIL = "remote port forwarding failed"
+    _SSH_255 = "exited with error status 255"
 
     def __init__(self):
         super().__init__()
         self.proc = None
         self.state = "off"
         self._pid = 0
+        self._dyn_port = 0
+        self._mon_port = 0
+        self._verified = False        # آیا یک‌بار اتصال واقعی تأیید شده؟
+        self._fwd_failed = False      # forwarding پورت مانیتور خراب است؟
+        self._verify_tries = 0
+        self._stopping = False
+        self._verify_timer = QtCore.QTimer(self)
+        self._verify_timer.setSingleShot(True)
+        self._verify_timer.timeout.connect(self._verify_step)
 
     def build_command(self, prof):
         ip = prof.get("ip", "").strip()
@@ -340,6 +452,12 @@ class TunnelController(QtCore.QObject):
             return
         self.state = "connecting";
         self.state_changed.emit("connecting")
+        self._verified = False
+        self._fwd_failed = False
+        self._verify_tries = 0
+        self._stopping = False
+        self._dyn_port = int(str(prof.get("dyn_port", "1085")).strip() or "1085")
+        self._mon_port = int(str(prof.get("mon_port", "1086")).strip() or "1086")
         self.log.emit("───────────────────────────")
         shown = list(cmd)
         if use_sshpass:
@@ -361,32 +479,106 @@ class TunnelController(QtCore.QObject):
         self._pid = int(self.proc.processId()) if self.proc else 0
         if self._pid:
             self.pid_started.emit(self._pid)
-        QtCore.QTimer.singleShot(1500, self._confirm_up)
+        # شروعِ چرخهٔ بررسیِ واقعی پس از فرصت کوتاهِ برقراری
+        self._verify_tries = 0
+        self._verify_timer.start(1500)
 
-    def _confirm_up(self):
-        if self.proc and self.proc.state() == QtCore.QProcess.Running:
-            self.state = "on";
-            self.state_changed.emit("on")
-            self.log.emit("✅ Tunnel established.")
+    def _verify_step(self):
+        """تا وقتی SOCKS واقعاً جواب بدهد ادامه می‌دهد؛ در صورت شکست
+        forwarding یا تمام‌شدن تلاش‌ها، اتصال را ناموفق اعلام می‌کند."""
+        if self._stopping or self.proc is None:
+            return
+        if self._verified:
+            return
+        # اگر forwarding پورت مانیتور خراب شده، دیگر منتظر نمی‌مانیم
+        if self._fwd_failed:
+            self._fail("verify_fwd_fail")
+            return
+        # اگر فرایند autossh مرده باشد
+        if self.proc.state() != QtCore.QProcess.Running:
+            self._fail("verify_fail")
+            return
+        # بررسی واقعی: ابتدا گوش‌دادن، سپس دست‌دادن کامل SOCKS5
+        if socks_port_listening(self._dyn_port):
+            res = socks5_handshake_ok(self._dyn_port)
+            # "ok" = CONNECT کامل موفق؛ "handshake" = پراکسی SOCKS زنده است
+            if res in ("ok", "handshake") and not self._fwd_failed:
+                self._verified = True
+                self.state = "on"
+                self.state_changed.emit("on")
+                detail = "SOCKS verified" if res == "ok" else "SOCKS responding"
+                self.log.emit(f"✅ Tunnel established ({detail}).")
+                return
+        # هنوز آماده نیست → تلاش مجدد تا حدود ۲۰ ثانیه
+        self._verify_tries += 1
+        if self._verify_tries >= 13:
+            self._fail("verify_fail")
+            return
+        self._verify_timer.start(1500)
+
+    def _fail(self, msg_key):
+        if self.state == "error":
+            return
+        self.log.emit("❌ Connection verification failed.")
+        self.failed.emit(msg_key)
+        # تونل ناموفق را پاک می‌بندیم تا فرایند معیوب باقی نماند
+        self._stopping = True
+        self._verify_timer.stop()
+        if self.proc is not None:
+            try:
+                self.proc.terminate()
+                if not self.proc.waitForFinished(1500):
+                    self.proc.kill()
+                    self.proc.waitForFinished(800)
+            except Exception:
+                pass
+            self.proc = None
+        if self._pid:
+            self.pid_stopped.emit(self._pid)
+            self._pid = 0
+        self._stopping = False
+        self.state = "error"
+        self.state_changed.emit("error")
 
     def _on_output(self):
         if not self.proc:
             return
         data = bytes(self.proc.readAllStandardOutput()).decode("utf-8", "replace")
         for line in data.splitlines():
-            if line.strip():
-                self.log.emit(line.rstrip())
+            if not line.strip():
+                continue
+            low = line.lower()
+            # تشخیص شکست forwarding پورت مانیتور (-M): علت اصلی اتصال جعلی
+            if self._FWD_FAIL in low:
+                self._fwd_failed = True
+            self.log.emit(line.rstrip())
+        # اگر در میانهٔ بررسی forwarding خراب شد، فوراً واکنش نشان بده
+        if self._fwd_failed and not self._verified and self.state == "connecting":
+            self._verify_timer.stop()
+            QtCore.QTimer.singleShot(0, lambda: self._fail("verify_fwd_fail"))
 
     def _on_finished(self, code, _status):
+        self._verify_timer.stop()
         self.log.emit(f"■ autossh exited (code {code}).")
         if self._pid:
             self.pid_stopped.emit(self._pid);
             self._pid = 0
         self.proc = None
+        # اگر در حال بستن عمدی به‌علت شکست هستیم، حالت error را خراب نکن
+        if self._stopping or self.state == "error":
+            return
+        # اگر هرگز تأیید نشده بود و خودش مرد → یعنی اتصال شکست خورده
+        if not self._verified and self.state == "connecting":
+            self.failed.emit("verify_ssh255" if code != 0 else "verify_fail")
+            self.state = "error"
+            self.state_changed.emit("error")
+            return
         self.state = "off";
         self.state_changed.emit("off")
 
     def stop(self):
+        self._stopping = True
+        self._verify_timer.stop()
         if self.proc is not None:
             self.log.emit("⏹  Stopping tunnel…")
             self.proc.terminate()
@@ -397,6 +589,8 @@ class TunnelController(QtCore.QObject):
         if self._pid:
             self.pid_stopped.emit(self._pid);
             self._pid = 0
+        self._verified = False
+        self._stopping = False
         self.state = "off";
         self.state_changed.emit("off")
 
@@ -592,6 +786,229 @@ def set_system_proxy_auto():
         except Exception as e:
             return False, str(e)
     return False, "AUTO_PROXY_UNSUPPORTED"
+
+
+# ════════════════════════════ پراکسی ترمینال (متغیرهای محیطی) ════════════════════════════
+# نکته: تونل SOCKS بدون مسیریابی TUN نمی‌تواند «به‌صورت شفاف» کل ترافیک
+# سیستم را عبور دهد. برای ترمینال، راه استانداردِ بدون‌نیاز‌به‌روت این است
+# که متغیرهای http_proxy/https_proxy/all_proxy را در یک فایل بنویسیم و آن را
+# در فایل‌های راه‌اندازی شِل (.bashrc/.zshrc/.profile) سورس کنیم. هنگام قطع،
+# فایل را خالی می‌کنیم تا پراکسی برود. برنامه این خط را خودکار اضافه/حذف می‌کند.
+PROXY_ENV_FILE = CONFIG_DIR / "proxy.env"
+_PROXY_ENV_DISPLAY = f"~/.config/{APP_SLUG}/proxy.env"
+# نشانه‌های بلوکِ مدیریت‌شده در فایل‌های شِل (برای افزودن/حذف خودکار)
+RC_MARK_BEGIN = "# >>> SSH Tunnel Manager proxy >>>"
+RC_MARK_END = "# <<< SSH Tunnel Manager proxy <<<"
+RC_SOURCE_LINE = f'[ -f "{PROXY_ENV_FILE}" ] && . "{PROXY_ENV_FILE}"'
+# فایل‌هایی که خط سورس را در آن‌ها مدیریت می‌کنیم (هرکدام که وجود داشته باشد)
+_RC_CANDIDATES = [".bashrc", ".zshrc", ".profile"]
+
+
+def write_terminal_proxy(port):
+    """نوشتن متغیرهای محیطی پراکسی برای ترمینال (شِل‌هایی که فایل را سورس می‌کنند)."""
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        socks = f"socks5h://127.0.0.1:{int(port)}"
+        body = (
+            "# auto-generated by SSH Tunnel Manager — do not edit\n"
+            f"export http_proxy=\"{socks}\"\n"
+            f"export https_proxy=\"{socks}\"\n"
+            f"export ftp_proxy=\"{socks}\"\n"
+            f"export all_proxy=\"{socks}\"\n"
+            f"export HTTP_PROXY=\"{socks}\"\n"
+            f"export HTTPS_PROXY=\"{socks}\"\n"
+            f"export FTP_PROXY=\"{socks}\"\n"
+            f"export ALL_PROXY=\"{socks}\"\n"
+            "export no_proxy=\"localhost,127.0.0.1,::1\"\n"
+            "export NO_PROXY=\"localhost,127.0.0.1,::1\"\n"
+        )
+        PROXY_ENV_FILE.write_text(body, "utf-8")
+        return True, f"Terminal proxy env written (socks5h 127.0.0.1:{port})."
+    except Exception as e:
+        return False, str(e)
+
+
+def clear_terminal_proxy():
+    """خالی‌کردن متغیرهای پراکسی ترمینال (unset) هنگام قطع."""
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        body = (
+            "# auto-generated by SSH Tunnel Manager — tunnel is OFF\n"
+            "unset http_proxy https_proxy ftp_proxy all_proxy no_proxy\n"
+            "unset HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY NO_PROXY\n"
+        )
+        PROXY_ENV_FILE.write_text(body, "utf-8")
+        return True, "Terminal proxy env cleared."
+    except Exception as e:
+        return False, str(e)
+
+
+def _rc_targets():
+    """فایل‌های شِلی که باید خط سورس در آن‌ها مدیریت شود.
+
+    اگر هیچ‌کدام وجود نداشت، .bashrc را به‌عنوان پیش‌فرض می‌سازد.
+    """
+    home = Path.home()
+    found = [home / name for name in _RC_CANDIDATES if (home / name).exists()]
+    if not found:
+        found = [home / ".bashrc"]
+    return found
+
+
+def _strip_managed_block(text):
+    """حذف بلوک مدیریت‌شدهٔ قبلی (بین نشانه‌ها) از متن یک فایل rc."""
+    lines = text.splitlines()
+    out = []
+    skip = False
+    for ln in lines:
+        if ln.strip() == RC_MARK_BEGIN:
+            skip = True
+            continue
+        if ln.strip() == RC_MARK_END:
+            skip = False
+            continue
+        if not skip:
+            out.append(ln)
+    return "\n".join(out)
+
+
+def install_rc_hook():
+    """افزودن خودکارِ خط سورسِ proxy.env به فایل‌های شِل (idempotent)."""
+    if OS == "windows":
+        return False, "Not applicable on Windows."
+    done = []
+    try:
+        for rc in _rc_targets():
+            old = rc.read_text("utf-8") if rc.exists() else ""
+            cleaned = _strip_managed_block(old)
+            block = f"{RC_MARK_BEGIN}\n{RC_SOURCE_LINE}\n{RC_MARK_END}"
+            new = (cleaned.rstrip("\n") + "\n\n" + block + "\n") if cleaned.strip() else (block + "\n")
+            rc.write_text(new, "utf-8")
+            done.append(rc.name)
+        return True, "Shell hook installed in: " + ", ".join(done)
+    except Exception as e:
+        return False, str(e)
+
+
+def remove_rc_hook():
+    """حذف خودکارِ خط سورس از فایل‌های شِل."""
+    if OS == "windows":
+        return False, "Not applicable on Windows."
+    changed = []
+    try:
+        home = Path.home()
+        for name in _RC_CANDIDATES:
+            rc = home / name
+            if not rc.exists():
+                continue
+            old = rc.read_text("utf-8")
+            if RC_MARK_BEGIN in old:
+                rc.write_text(_strip_managed_block(old).rstrip("\n") + "\n", "utf-8")
+                changed.append(rc.name)
+        if changed:
+            return True, "Shell hook removed from: " + ", ".join(changed)
+        return True, "No shell hook to remove."
+    except Exception as e:
+        return False, str(e)
+
+
+def rc_hook_installed():
+    """آیا خط سورس در یکی از فایل‌های شِل هست؟"""
+    if OS == "windows":
+        return False
+    home = Path.home()
+    for name in _RC_CANDIDATES:
+        rc = home / name
+        try:
+            if rc.exists() and RC_MARK_BEGIN in rc.read_text("utf-8"):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+# ════════════════════════════ اجرای خودکار هنگام بوت ════════════════════════════
+AUTOSTART_DIR = Path.home() / ".config" / "autostart"
+AUTOSTART_FILE = AUTOSTART_DIR / f"{APP_SLUG}.desktop"
+_OLD_AUTOSTART_FILE = AUTOSTART_DIR / "autossh-manager.desktop"
+
+
+def _app_launch_command():
+    """دستوری که برنامه را دوباره اجرا می‌کند (همین اسکریپت با همین مفسر پایتون)."""
+    script = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else __file__
+    py = sys.executable or "python3"
+    return f'"{py}" "{script}"'
+
+
+def autostart_enabled():
+    if OS == "linux":
+        return AUTOSTART_FILE.exists() or _OLD_AUTOSTART_FILE.exists()
+    if OS == "windows":
+        try:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run")
+            try:
+                winreg.QueryValueEx(key, APP_NAME)
+                return True
+            except FileNotFoundError:
+                return False
+            finally:
+                winreg.CloseKey(key)
+        except Exception:
+            return False
+    return False
+
+
+def set_autostart(enable):
+    """فعال/غیرفعال‌کردن اجرای برنامه هنگام ورود کاربر."""
+    try:
+        if OS == "linux":
+            if enable:
+                AUTOSTART_DIR.mkdir(parents=True, exist_ok=True)
+                content = (
+                    "[Desktop Entry]\n"
+                    "Type=Application\n"
+                    f"Name={APP_NAME}\n"
+                    f"Exec={_app_launch_command()}\n"
+                    "X-GNOME-Autostart-enabled=true\n"
+                    "Terminal=false\n"
+                )
+                AUTOSTART_FILE.write_text(content, "utf-8")
+                # حذف فایل با نام قدیمی اگر باقی مانده باشد
+                if _OLD_AUTOSTART_FILE.exists():
+                    try:
+                        _OLD_AUTOSTART_FILE.unlink()
+                    except Exception:
+                        pass
+            else:
+                for f in (AUTOSTART_FILE, _OLD_AUTOSTART_FILE):
+                    if f.exists():
+                        try:
+                            f.unlink()
+                        except Exception:
+                            pass
+            return True, ""
+        if OS == "windows":
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0, winreg.KEY_WRITE)
+            if enable:
+                winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ,
+                                  _app_launch_command())
+            else:
+                try:
+                    winreg.DeleteValue(key, APP_NAME)
+                except FileNotFoundError:
+                    pass
+            winreg.CloseKey(key)
+            return True, ""
+        return False, "Autostart not supported on this OS."
+    except Exception as e:
+        return False, str(e)
 
 
 def _pid_is_autossh(pid):
@@ -843,17 +1260,23 @@ class MainWindow(QtWidgets.QWidget):
         self.theme_name = self.cfg.get("theme", "light")
         self.scale = self.cfg.get("scale", 100)
         self._autossh_installed = None
+        self._proxy_applied = False
         self.tunnel = TunnelController()
         self.tunnel.log.connect(self.on_log)
         self.tunnel.state_changed.connect(self.on_state)
         self.tunnel.pid_started.connect(self._track_pid)
         self.tunnel.pid_stopped.connect(self._untrack_pid)
+        self.tunnel.failed.connect(self._on_tunnel_failed)
 
         self.setWindowTitle(APP_NAME)
         self.setWindowFlags(QtCore.Qt.FramelessWindowHint | QtCore.Qt.Window)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         self._drag = None
         self._really_quit = False
+        # تایمر دیبانس برای ذخیرهٔ اندازهٔ پنجره هنگام تغییر اندازه
+        self._save_size_timer = QtCore.QTimer(self)
+        self._save_size_timer.setSingleShot(True)
+        self._save_size_timer.timeout.connect(self._persist_window_size)
 
         self._build_ui()
         self.apply_theme()
@@ -862,11 +1285,46 @@ class MainWindow(QtWidgets.QWidget):
         self._build_tray()
 
         scr = QtWidgets.QApplication.primaryScreen().availableGeometry()
-        w = min(int(scr.width() * 0.42), 560)
-        h = min(int(scr.height() * 0.82), 760)
-        self.resize(max(w, 430), max(h, 640))
+        self.setMinimumSize(360, 420)
+        # عرض/ارتفاع ذخیره‌شده را بازیابی کن؛ در نبودِ آن، عرض پیش‌فرض
+        saved_w = self.cfg.get("win_w")
+        saved_h = self.cfg.get("win_h")
+        default_w = min(int(scr.width() * 0.42), 560)
+        init_w = int(saved_w) if saved_w else max(default_w, 430)
+        self.resize(init_w, int(saved_h) if saved_h else 640)
         self.move(scr.center().x() - self.width() // 2, scr.center().y() - self.height() // 2)
+        # اگر ارتفاعی ذخیره نشده، ارتفاع پیش‌فرض = اندازهٔ محتوای تب «خانه»
+        if not saved_h:
+            QtCore.QTimer.singleShot(0, self._fit_height_to_home)
         QtCore.QTimer.singleShot(400, self.check_autossh_installed)
+        # اتصال خودکار به آخرین سرور هنگام اجرا (اگر هر دو گزینه فعال باشند)
+        if self.cfg.get("autostart", False) and self.cfg.get("autoconnect", False):
+            QtCore.QTimer.singleShot(900, self._maybe_autoconnect)
+
+    def _fit_height_to_home(self):
+        """ارتفاع پیش‌فرض پنجره = ارتفاع محتوای تب خانه. ارتفاع قفل نمی‌شود؛
+        کاربر می‌تواند آزادانه تغییرش دهد (و ذخیره می‌شود)."""
+        try:
+            scr = QtWidgets.QApplication.primaryScreen().availableGeometry()
+            home_h = self.home_page.sizeHint().height()
+            chrome = self.height() - self.stack.height()  # هدر+تب‌بار+مارجین‌ها
+            target = home_h + max(chrome, 0)
+            target = max(480, min(target, int(scr.height() * 0.95)))
+            self.resize(self.width(), target)
+            self.cfg["win_h"] = target
+            self.cfg["win_w"] = self.width()
+            self.save_config()
+            self.move(self.x(), max(scr.top() + 10, scr.center().y() - target // 2))
+        except Exception:
+            pass
+
+    def _maybe_autoconnect(self):
+        if self.tunnel.state in ("on", "connecting"):
+            return
+        p = self.active_server()
+        if p and shutil.which("autossh"):
+            self.on_log("▶ Auto-connecting to last server…")
+            self.tunnel.start(p)
 
     def t(self, key):
         return TR[self.lang][key]
@@ -917,7 +1375,7 @@ class MainWindow(QtWidgets.QWidget):
         header.setObjectName("header")
         hl = QtWidgets.QHBoxLayout(header);
         hl.setContentsMargins(0, 0, 0, 0)
-        title = QtWidgets.QLabel("AutoSSH Manager");
+        title = QtWidgets.QLabel("SSH Tunnel Manager");
         title.setObjectName("titleLbl")
         self.theme_btn = QtWidgets.QPushButton("🌙");
         self.theme_btn.setObjectName("winBtn")
@@ -940,9 +1398,10 @@ class MainWindow(QtWidgets.QWidget):
         v.addWidget(header)
 
         self.stack = QtWidgets.QStackedWidget()
-        self.stack.addWidget(self._page_home())
-        self.stack.addWidget(self._page_servers())
-        self.stack.addWidget(self._page_settings())
+        self.home_page = self._page_home()
+        self.stack.addWidget(self.home_page)
+        self.stack.addWidget(self._wrap_scroll(self._page_servers()))
+        self.stack.addWidget(self._wrap_scroll(self._page_settings()))
         v.addWidget(self.stack, 1)
 
         v.addWidget(self._tabbar())
@@ -977,7 +1436,7 @@ class MainWindow(QtWidgets.QWidget):
         bl.setContentsMargins(8, 6, 8, 6)
         bl.setSpacing(6)
         self.tabs = []
-        self._tab_icons = ["🏠", "❖", "⚙"]
+        self._tab_icons = ["🔘", "📡", "⚙️"]
         self._tab_keys = ["tab_home", "tab_servers", "tab_settings"]
         for i, icon in enumerate(self._tab_icons):
             b = QtWidgets.QPushButton(f"{icon}\n")
@@ -1001,6 +1460,47 @@ class MainWindow(QtWidgets.QWidget):
         self.stack.setCurrentIndex(n)
         if n == 1:
             self.refresh_servers()
+
+    def _wrap_scroll(self, inner):
+        """قراردادن یک صفحه داخل ناحیهٔ اسکرول‌شونده (برای تب‌های سرورها و تنظیمات).
+
+        فقط اسکرول عمودی؛ محتوا با عرض پنجره هم‌اندازه می‌شود (ریسپانسیو) و
+        افقی اسکرول نمی‌شود.
+        """
+        # اجازه بده محتوا تا عرض کم جمع شود تا کلیپ/اسکرول افقی رخ ندهد
+        inner.setMinimumWidth(0)
+        inner.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                            QtWidgets.QSizePolicy.Preferred)
+        sa = QtWidgets.QScrollArea()
+        sa.setWidgetResizable(True)
+        sa.setFrameShape(QtWidgets.QFrame.NoFrame)
+        sa.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        sa.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        sa.setMinimumWidth(0)
+        sa.setWidget(inner)
+        return sa
+
+    def _wrap_checkbox(self, on_toggled, checked=False, enabled=True):
+        """چک‌باکس با متنِ کنارِ آن که سطرشکن (word-wrap) است تا در عرض کم
+        به‌جای کلیپ‌شدن، به خط بعد برود. متن بعداً در retranslate ست می‌شود.
+        برمی‌گرداند: (container_layout, checkbox, label)
+        """
+        row = QtWidgets.QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        cb = QtWidgets.QCheckBox("")
+        cb.setChecked(checked)
+        cb.setEnabled(enabled)
+        cb.toggled.connect(on_toggled)
+        lbl = QtWidgets.QLabel("")
+        lbl.setWordWrap(True)
+        lbl.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                          QtWidgets.QSizePolicy.Preferred)
+        # کلیک روی متن هم چک‌باکس را تغییر دهد (اگر فعال باشد)
+        lbl.mousePressEvent = lambda e, c=cb: (c.toggle() if c.isEnabled() else None)
+        row.addWidget(cb, 0, QtCore.Qt.AlignTop)
+        row.addWidget(lbl, 1)
+        return row, cb, lbl
 
     # ───────── صفحهٔ خانه ─────────
     def _page_home(self):
@@ -1130,6 +1630,10 @@ class MainWindow(QtWidgets.QWidget):
         c1l.addLayout(row)
         self.install_cmd = QtWidgets.QLineEdit(install_primary_command())
         self.install_cmd.setReadOnly(True);
+        self.install_cmd.setMinimumWidth(0)
+        self.install_cmd.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                                       QtWidgets.QSizePolicy.Fixed)
+        self.install_cmd.setCursorPosition(0)
         c1l.addWidget(self.install_cmd)
         ib = QtWidgets.QHBoxLayout()
         self.copy_btn = QtWidgets.QPushButton("")
@@ -1180,6 +1684,49 @@ class MainWindow(QtWidgets.QWidget):
         c2l.addLayout(trow)
         l.addWidget(c2)
 
+        # startup (autostart + auto-connect)
+        c_start = QtWidgets.QFrame();
+        c_start.setObjectName("card")
+        csl = QtWidgets.QVBoxLayout(c_start);
+        csl.setContentsMargins(16, 14, 16, 14);
+        csl.setSpacing(8)
+        self.startup_title = QtWidgets.QLabel("");
+        self.startup_title.setObjectName("h2")
+        self.startup_title.setWordWrap(True)
+        csl.addWidget(self.startup_title)
+        as_row, self.autostart_chk, self.autostart_lbl = self._wrap_checkbox(
+            self.on_autostart_toggled, checked=bool(self.cfg.get("autostart", False)))
+        csl.addLayout(as_row)
+        ac_row, self.autoconnect_chk, self.autoconnect_lbl = self._wrap_checkbox(
+            self.on_autoconnect_toggled,
+            checked=bool(self.cfg.get("autoconnect", False)),
+            enabled=self.autostart_chk.isChecked())
+        csl.addLayout(ac_row)
+        l.addWidget(c_start)
+
+        # terminal / system-wide proxy
+        c_term = QtWidgets.QFrame();
+        c_term.setObjectName("card")
+        ctl = QtWidgets.QVBoxLayout(c_term);
+        ctl.setContentsMargins(16, 14, 16, 14);
+        ctl.setSpacing(8)
+        self.term_proxy_title = QtWidgets.QLabel("");
+        self.term_proxy_title.setObjectName("h2")
+        self.term_proxy_title.setWordWrap(True)
+        ctl.addWidget(self.term_proxy_title)
+        tp_row, self.term_proxy_chk, self.term_proxy_lbl = self._wrap_checkbox(
+            self.on_term_proxy_toggled, checked=bool(self.cfg.get("term_proxy", False)))
+        ctl.addLayout(tp_row)
+        self.term_proxy_hint = QtWidgets.QLabel("");
+        self.term_proxy_hint.setObjectName("muted")
+        self.term_proxy_hint.setWordWrap(True)
+        ctl.addWidget(self.term_proxy_hint)
+        self.term_proxy_copy_btn = QtWidgets.QPushButton("")
+        self.term_proxy_copy_btn.clicked.connect(
+            lambda: QtWidgets.QApplication.clipboard().setText("source ~/.bashrc"))
+        ctl.addWidget(self.term_proxy_copy_btn)
+        l.addWidget(c_term)
+
         # pkill
         c3 = QtWidgets.QFrame();
         c3.setObjectName("card")
@@ -1196,6 +1743,12 @@ class MainWindow(QtWidgets.QWidget):
         c3l.addWidget(self.pkill_btn)
         l.addWidget(c3);
         l.addStretch(1)
+        # دکمه‌ها بتوانند در عرض کم جمع شوند (به‌جای پهن‌نگه‌داشتن کارت)
+        for b in (self.copy_btn, self.recheck_btn, self.theme_toggle_btn,
+                  self.term_proxy_copy_btn, self.pkill_btn):
+            b.setMinimumWidth(0)
+            b.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                            QtWidgets.QSizePolicy.Fixed)
         return page
 
     # ───────── ترجمهٔ کل رابط ─────────
@@ -1226,6 +1779,13 @@ class MainWindow(QtWidgets.QWidget):
         self.theme_toggle_btn.setText(self.t("toggle_theme"))
         self.cleanup_hint.setText(self.t("cleanup_hint"))
         self.pkill_btn.setText(self.t("pkill"))
+        self.startup_title.setText(self.t("startup_title"))
+        self.autostart_lbl.setText(self.t("autostart_chk"))
+        self.autoconnect_lbl.setText(self.t("autoconnect_chk"))
+        self.term_proxy_title.setText(self.t("term_proxy_title"))
+        self.term_proxy_lbl.setText(self.t("term_proxy_chk"))
+        self.term_proxy_hint.setText(self.t("term_proxy_hint"))
+        self.term_proxy_copy_btn.setText(self.t("term_proxy_copy"))
         self._refresh_autossh_label()
         self.refresh_servers()
         self.sync_active_pill()
@@ -1466,9 +2026,7 @@ class MainWindow(QtWidgets.QWidget):
     def toggle_tunnel(self):
         if self.tunnel.state in ("on", "connecting"):
             self.tunnel.stop()
-            ok, msg = set_system_proxy_auto()  # هنگام قطع → Automatic/Direct
-            self.on_log(self._proxy_msg(ok, msg))
-            self.update_socks_row()
+            # revert از طریق on_state("off") انجام می‌شود
         else:
             p = self.active_server()
             if not p:
@@ -1476,6 +2034,82 @@ class MainWindow(QtWidgets.QWidget):
                              APP_NAME, self.t("warn_pick")).exec_()
                 return
             self.tunnel.start(p)
+
+    def _revert_all_proxy(self):
+        """بازگرداندن همهٔ تغییرات پراکسی به حالت اولیه: سیستم → Automatic،
+        و پاک‌کردن متغیرهای محیطی ترمینال. این تابع هم هنگام قطعِ دستی و هم
+        هنگام خروجِ خودکارِ تونل (شکست/قطع ناگهانی) صدا زده می‌شود."""
+        ok, msg = set_system_proxy_auto()
+        self.on_log(self._proxy_msg(ok, msg))
+        if self.cfg.get("term_proxy", False):
+            tok, tmsg = clear_terminal_proxy()
+            self.on_log(self._proxy_msg(tok, tmsg))
+        self.update_socks_row()
+
+    def _on_tunnel_failed(self, msg_key):
+        """نمایش پیام شکستِ واقعیِ اتصال به کاربر و در لاگ."""
+        p = self.active_server()
+        mon = str(p.get("mon_port", "1086")) if p else "1086"
+        try:
+            text = self.t(msg_key).format(m=mon)
+        except Exception:
+            text = self.t(msg_key)
+        self.on_log(text)
+        self._msgbox(QtWidgets.QMessageBox.Critical, self.t("status_error"), text).exec_()
+
+    def on_autostart_toggled(self, checked):
+        ok, err = set_autostart(checked)
+        if not ok:
+            # اگر اعمال نشد، تیک را برگردان و خطا را نشان بده
+            self.autostart_chk.blockSignals(True)
+            self.autostart_chk.setChecked(autostart_enabled())
+            self.autostart_chk.blockSignals(False)
+            if err:
+                self.on_log("⚠️ " + err)
+        self.cfg["autostart"] = self.autostart_chk.isChecked()
+        # اتصال خودکار فقط وقتی معنا دارد که اجرای خودکار فعال باشد
+        self.autoconnect_chk.setEnabled(self.autostart_chk.isChecked())
+        if not self.autostart_chk.isChecked():
+            self.autoconnect_chk.setChecked(False)
+            self.cfg["autoconnect"] = False
+        self.save_config()
+
+    def on_autoconnect_toggled(self, checked):
+        self.cfg["autoconnect"] = bool(checked)
+        self.save_config()
+
+    def on_term_proxy_toggled(self, checked):
+        self.cfg["term_proxy"] = bool(checked)
+        self.save_config()
+        # افزودن/حذفِ خودکارِ خط سورس در فایل‌های شِل
+        if checked:
+            ok, msg = install_rc_hook()
+            if msg:
+                self.on_log(self._proxy_msg(ok, msg))
+            # وضعیت فعلی پراکسی را در proxy.env بنویس (فعال یا خاموش)
+            if self.tunnel.state == "on":
+                p = self.active_server()
+                if p:
+                    write_terminal_proxy(int(p["dyn_port"]))
+            else:
+                clear_terminal_proxy()
+            self.on_log("ℹ️ " + self.t("term_proxy_reload_hint"))
+        else:
+            # هنگام غیرفعال‌کردن: خط سورس و متغیرها را پاک کن
+            ok, msg = remove_rc_hook()
+            if msg:
+                self.on_log(self._proxy_msg(ok, msg))
+            clear_terminal_proxy()
+        # اگر هم‌اکنون متصل است، وضعیت پراکسیِ ترمینال را همگام کن
+        if self.tunnel.state == "on":
+            p = self.active_server()
+            if checked and p:
+                tok, tmsg = write_terminal_proxy(int(p["dyn_port"]))
+                self.on_log(self._proxy_msg(tok, tmsg))
+                self._proxy_applied = True
+            elif not checked:
+                tok, tmsg = clear_terminal_proxy()
+                self.on_log(self._proxy_msg(tok, tmsg))
 
     def on_state(self, state):
         c = THEMES[self.theme_name]
@@ -1488,7 +2122,12 @@ class MainWindow(QtWidgets.QWidget):
             if p and p.get("set_socks", True):
                 ok, msg = set_system_socks(int(p["dyn_port"]))
                 self.on_log(self._proxy_msg(ok, msg))
-                self.update_socks_row()
+                self._proxy_applied = True
+            if p and self.cfg.get("term_proxy", False):
+                tok, tmsg = write_terminal_proxy(int(p["dyn_port"]))
+                self.on_log(self._proxy_msg(tok, tmsg))
+                self._proxy_applied = True
+            self.update_socks_row()
         elif state == "connecting":
             self.power.set_state("busy", c["busy"])
             self.status_lbl.setText(self.t("status_connecting"))
@@ -1497,12 +2136,24 @@ class MainWindow(QtWidgets.QWidget):
             self.power.set_state("off", c["danger"])
             self.status_lbl.setText(self.t("status_error"))
             self.status_lbl.setStyleSheet(f"color:{c['danger']};")
+            self.dot.setStyleSheet(f"color:{c['off']}; font-size:14px;")
+            # هر تغییرِ پراکسیِ احتمالی را برگردان (پوشش قطع/شکستِ خودکار)
+            if getattr(self, "_proxy_applied", False):
+                self._revert_all_proxy()
+                self._proxy_applied = False
+            else:
+                self.update_socks_row()
         else:
             self.power.set_state("off", c["off"])
             self.status_lbl.setText(self.t("status_off"))
             self.status_lbl.setStyleSheet(f"color:{c['off']};")
             self.dot.setStyleSheet(f"color:{c['off']}; font-size:14px;")
-            self.update_socks_row()
+            # هر تغییرِ پراکسیِ احتمالی را برگردان (پوشش قطع/شکستِ خودکار)
+            if getattr(self, "_proxy_applied", False):
+                self._revert_all_proxy()
+                self._proxy_applied = False
+            else:
+                self.update_socks_row()
         self._update_tray()
 
     # ───────── ردیابی PID تونل‌های ساخته‌شده توسط برنامه ─────────
@@ -1652,7 +2303,22 @@ class MainWindow(QtWidgets.QWidget):
     def resizeEvent(self, e):
         if hasattr(self, "grip"):
             self.grip.move(self.root.width() - 22, self.root.height() - 22)
+        # ذخیرهٔ اندازهٔ پنجره (با کمی تأخیر تا هنگام درگ مدام ذخیره نشود)
+        if hasattr(self, "_save_size_timer"):
+            self._save_size_timer.start(500)
         super().resizeEvent(e)
+
+    def _persist_window_size(self):
+        # هنگام بسته/کمینه‌بودن یا بزرگ‌نمایی، اندازه را ذخیره نکن
+        if self.isMaximized() or self.isMinimized() or not self.isVisible():
+            return
+        # عرض واقعیِ بدون احتساب کشوی لاگِ باز
+        w = self.width()
+        if getattr(self.drawer, "_open", False):
+            w = max(w - self.drawer._w, 430)
+        self.cfg["win_w"] = w
+        self.cfg["win_h"] = self.height()
+        self.save_config()
 
     # ───────── ذخیره/بارگذاری ─────────
     def load_config(self):
@@ -1672,6 +2338,7 @@ class MainWindow(QtWidgets.QWidget):
 
     def closeEvent(self, e):
         if getattr(self, "tray", None) and not self._really_quit:
+            self._persist_window_size()
             e.ignore();
             self.hide()
             if not self.cfg.get("tray_hint_shown"):
@@ -1680,6 +2347,7 @@ class MainWindow(QtWidgets.QWidget):
                 self.tray.showMessage(APP_NAME, self.t("tray_hint"),
                                       QtWidgets.QSystemTrayIcon.Information, 4000)
             return
+        self._persist_window_size()
         try:
             self.tunnel.stop()
         except Exception:
