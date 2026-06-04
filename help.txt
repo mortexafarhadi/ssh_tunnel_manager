@@ -1,3 +1,3 @@
 create executable file from py file
 
-	pyinstaller --onefile --icon=logo.ico --name="ssh_tunnel_manager" main.py
+	pyinstaller --onefile --icon=logo.ico --name="ssh_tunnel_proxy" main.py
